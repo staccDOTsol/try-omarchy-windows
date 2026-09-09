@@ -36,6 +36,30 @@ See [app compatibility](docs/COMPATIBILITY.md) for package support and current V
 |---|---|
 | ![Omarchy first-run setup inside the Try Omarchy window](docs/images/first-run.jpg) | ![Omarchy pixel-logo screensaver](docs/images/screensaver.jpg) |
 
+## openzoo at first launch
+
+This fork ships [Omarchy Max](https://openzoo.fun/omarchymax): the guest comes
+up with [openzoo](https://openzoo.fun) without touching the locked, verified
+image contents.
+
+- **Nothing added to the image.** Node and the `openzoo` CLI are installed by a
+  root oneshot on the first *online* boot (`try-omarchy-openzoo-bootstrap.service`).
+  The package lock stays exactly what the build verified; a boot without
+  network simply retries next time.
+- **A localhost-only x402 pay-per-call proxy** runs in every user session at
+  `http://localhost:8402/v1` (`openzoo-proxy.service`, no public tunnel).
+- **The openzoo.fun/omarchymax one-liner runs once at first login** — the
+  agent in Omarchy's agent list, the bar widget, and local ingest — and stamps
+  `~/.openzoo/omarchymax-done` so it never runs again.
+- **OpenAI's ChatGPT desktop app pays per turn with no OpenAI account.**
+  `~/.codex/config.toml` is seeded so the app's Codex side talks to the local
+  proxy; in the app pick "sign in with API key" and enter any key (the zoo
+  takes payment over x402, not keys).
+- **The ChatGPT app itself is proprietary and not shipped.** Inside Omarchy,
+  download the amd64 `.deb` from <https://chatgpt.com/download>, then run
+  `try-omarchy-chatgpt --deb ~/Downloads/chatgpt_amd64.deb`. It unpacks the
+  app under `~/.openzoo/apps/chatgpt` (no dpkg involved) and launches it.
+
 ## Essential keys
 
 - **Windows key** acts as Super, but only while the Try Omarchy window is focused. Everywhere else it stays your normal Windows key, so the Start menu and Win+Shift+S keep working.
