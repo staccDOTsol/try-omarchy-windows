@@ -1,0 +1,253 @@
+From 979e5c38ade396b3764a71f5596d60599b45e3b9 Mon Sep 17 00:00:00 2001
+From: staccDOTsol <22843601+staccDOTsol@users.noreply.github.com>
+Date: Wed, 9 Sep 2026 13:46:16 +0000
+Subject: [PATCH] Keep the openzoo CLI current instead of freezing it at first
+ boot
+
+Patch 0045 made the openzoo bootstrap a strict one-shot:
+try-omarchy-openzoo-bootstrap.service carried
+ConditionPathExists=!/var/lib/try-omarchy/openzoo-bootstrapped and the script
+exited 0 as soon as that stamp existed, so `npm install -g openzoo` ran exactly
+once, on the first online boot, and openzoo-proxy.service then ran that same
+build of /usr/bin/openzoo forever. A guest installed today gets openzoo 0.51.4 -
+whose payment rail is broken; 0.51.5 fixes it - and never sees the fix, because
+nothing in the image ever asks npm again.
+
+The bootstrap now runs on every online boot and is idempotent:
+
+- The unit loses its ConditionPathExists. After/Wants=network-online.target,
+  Type=oneshot and TimeoutStartSec=15min are unchanged.
+- The script still installs nodejs and npm through pacman only when they are
+  missing, then runs `npm install -g --no-fund --no-audit openzoo@latest`, which
+  upgrades when the registry has something newer and is a no-op otherwise.
+- The npm call runs under `timeout 10m`, so a hung or unreachable registry
+  cannot hold the boot open until systemd's own timeout kills the unit.
+- Failure is fatal only when there is nothing to fall back to: with openzoo
+  already installed the failure is logged and the boot continues on the version
+  already on disk, so boots without network behave exactly as before; with no
+  openzoo installed the script still exits non-zero and the unit retries next
+  boot.
+- The stamp is still written after a successful install - openzoo-proxy.service
+  and the first-launch gate depend on the CLI being present - it just no longer
+  suppresses the run.
+- The final log line reports which version ended up installed.
+
+The user-session proxy deliberately gets no restart mechanism. The bootstrap is
+ordered on network-online.target in the system manager and finishes before the
+graphical session starts the user manager's default.target, so a normal boot
+already starts openzoo-proxy.service from the upgraded binary; the only window
+is an upgrade landing under a session that is already running. Closing it would
+mean the root oneshot reaching into every logged-in user's session manager to
+restart the proxy, which can tear down an x402 request mid-payment to save one
+reboot. Not trivial, not safe, left out.
+
+The unit and the script are both in the compat overlay, so compat_revision goes
+12 -> ... 13 -> 14: persistent disks created by earlier releases must receive
+the rerunning unit, or exactly the machines this fixes would keep the frozen
+one.
+
+guest/tests/test_openzoo.py and guest/tests/verify.py pin the new contract: the
+unit has no ConditionPathExists, the script asks for openzoo@latest under a
+bounded timeout and no longer short-circuits on the stamp, and the compat
+revision is 14.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015nnYjoxQv7k7SoVmzzoKBr
+---
+ .../try-omarchy-openzoo-bootstrap.service     |  3 +-
+ .../local/lib/try-omarchy/openzoo-bootstrap   | 42 ++++++++++++++-----
+ guest/scripts/finalize-rootfs.sh              |  2 +-
+ guest/tests/test_openzoo.py                   | 36 ++++++++++++----
+ guest/tests/verify.py                         |  9 ++--
+ 5 files changed, 65 insertions(+), 27 deletions(-)
+
+diff --git a/guest/factory-overlay/etc/systemd/system/try-omarchy-openzoo-bootstrap.service b/guest/factory-overlay/etc/systemd/system/try-omarchy-openzoo-bootstrap.service
+index 9b037cf..756d385 100644
+--- a/guest/factory-overlay/etc/systemd/system/try-omarchy-openzoo-bootstrap.service
++++ b/guest/factory-overlay/etc/systemd/system/try-omarchy-openzoo-bootstrap.service
+@@ -1,8 +1,7 @@
+ [Unit]
+-Description=Install Node and the openzoo x402 proxy on the first online boot
++Description=Install or update Node and the openzoo x402 proxy on every online boot
+ After=network-online.target
+ Wants=network-online.target
+-ConditionPathExists=!/var/lib/try-omarchy/openzoo-bootstrapped
+ 
+ [Service]
+ Type=oneshot
+diff --git a/guest/factory-overlay/usr/local/lib/try-omarchy/openzoo-bootstrap b/guest/factory-overlay/usr/local/lib/try-omarchy/openzoo-bootstrap
+index 5a9a603..3551896 100755
+--- a/guest/factory-overlay/usr/local/lib/try-omarchy/openzoo-bootstrap
++++ b/guest/factory-overlay/usr/local/lib/try-omarchy/openzoo-bootstrap
+@@ -1,24 +1,44 @@
+ #!/bin/bash
+-# First-boot openzoo bootstrap: Node and the openzoo CLI, installed ONCE from
+-# the network on the first online boot, so the locked factory package set
+-# stays exactly what the build verified. The stamp file is the only state; a
+-# boot without network simply tries again next time. After this every user
+-# session gets a local x402 proxy on :8402 (openzoo-proxy.service), and the
+-# seeded ~/.codex/config.toml makes the Codex side of OpenAI's ChatGPT desktop
+-# app pay per turn through it.
++# openzoo bootstrap: Node and the openzoo CLI, installed and kept current from
++# the network at boot, so the locked factory package set stays exactly what the
++# build verified (nothing was added to packages.txt). This runs on EVERY online
++# boot, not once: it installs `openzoo@latest`, which upgrades when npm has
++# something newer and is a no-op otherwise, so a machine installed months ago
++# receives openzoo fixes instead of freezing at whatever the registry served on
++# its first boot. The stamp file records that the CLI is present — other units
++# and the first-launch gate wait on it — but it no longer suppresses the run. A
++# boot without network keeps the version already installed and tries again next
++# time. After this every user session gets a local x402 proxy on :8402
++# (openzoo-proxy.service), and the seeded ~/.codex/config.toml makes the Codex
++# side of OpenAI's ChatGPT desktop app pay per turn through it.
+ set -euo pipefail
+ 
+ stamp=/var/lib/try-omarchy/openzoo-bootstrapped
+-[[ -e $stamp ]] && exit 0
+ 
+ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+   pacman -Sy --needed --noconfirm nodejs npm
+ fi
+-if ! command -v openzoo >/dev/null 2>&1; then
+-  npm install -g --no-fund --no-audit openzoo
++
++had_openzoo=0
++if command -v openzoo >/dev/null 2>&1; then
++  had_openzoo=1
++fi
++
++# Bounded so a hung or unreachable registry cannot hold the boot open until the
++# unit's own TimeoutStartSec kills it.
++if ! timeout 10m npm install -g --no-fund --no-audit openzoo@latest; then
++  if ((had_openzoo)); then
++    echo "openzoo@latest unavailable (offline or registry down); keeping the installed version" >&2
++  else
++    echo "openzoo did not install" >&2
++    exit 1
++  fi
+ fi
+ command -v openzoo >/dev/null 2>&1 || { echo "openzoo did not install" >&2; exit 1; }
+ 
+ mkdir -p "$(dirname "$stamp")"
+ : >"$stamp"
+-echo "openzoo bootstrap complete: $(command -v openzoo)"
++
++version=$(openzoo --version 2>/dev/null | head -n1 || true)
++[[ -n $version ]] || version=$(npm ls -g openzoo --depth=0 2>/dev/null | sed -n 's/.*\(openzoo@[^ ]*\).*/\1/p' | head -n1 || true)
++echo "openzoo bootstrap complete: $(command -v openzoo) ${version:-version unknown}"
+diff --git a/guest/scripts/finalize-rootfs.sh b/guest/scripts/finalize-rootfs.sh
+index 59ae6b7..6508738 100755
+--- a/guest/scripts/finalize-rootfs.sh
++++ b/guest/scripts/finalize-rootfs.sh
+@@ -101,7 +101,7 @@ kernel_release=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '
+ }
+ # Bump this revision whenever compat-overlay.tar changes in a way that must be
+ # applied to persistent disks created by an earlier launcher release.
+-compat_revision=13
++compat_revision=14
+ printf '%s:%s\n' "$compat_revision" "$kernel_release" >/usr/share/try-omarchy/compat-version
+ 
+ # Never let the container host's hardware autodetection remove the virtual
+diff --git a/guest/tests/test_openzoo.py b/guest/tests/test_openzoo.py
+index b536ac9..62bccb5 100644
+--- a/guest/tests/test_openzoo.py
++++ b/guest/tests/test_openzoo.py
+@@ -1,9 +1,10 @@
+-"""Contract tests for the openzoo seed: Node and the openzoo CLI arrive on the
+-first online boot through a root oneshot, every user session runs a
+-localhost-only x402 proxy, and the first graphical login runs the
+-openzoo.fun/omarchymax one-liner once. The locked factory package set must
+-stay untouched, which is the whole point of doing this at boot instead of at
+-build time."""
++"""Contract tests for the openzoo seed: Node and the openzoo CLI arrive through
++a root oneshot that runs on every online boot and installs openzoo@latest, so
++the CLI keeps up with released fixes instead of freezing at the version npm
++served on the first boot; every user session runs a localhost-only x402 proxy,
++and the first graphical login runs the openzoo.fun/omarchymax one-liner once.
++The locked factory package set must stay untouched, which is the whole point of
++doing this at boot instead of at build time."""
+ 
+ from __future__ import annotations
+ 
+@@ -60,9 +61,22 @@ class ScriptTests(unittest.TestCase):
+     def test_bootstrap_installs_node_and_openzoo_then_stamps(self) -> None:
+         text = read(BOOTSTRAP)
+         self.assertRegex(text, r"(?m)^\s*pacman -Sy\b.*\bnodejs\b.*\bnpm\b")
+-        self.assertRegex(text, r"(?m)^\s*npm install -g\b.*\bopenzoo\b")
++        self.assertRegex(text, r"(?m)^\s*.*npm install -g\b.*\bopenzoo\b")
+         self.assertIn("/var/lib/try-omarchy/openzoo-bootstrapped", text)
+ 
++    def test_bootstrap_upgrades_openzoo_on_every_boot(self) -> None:
++        text = read(BOOTSTRAP)
++        # @latest is what turns the boot-time install into an upgrade: npm
++        # replaces an older global openzoo and no-ops when it is already current.
++        self.assertIn("openzoo@latest", text)
++        # The stamp records that the CLI is present; it must not gate the run,
++        # or the guest freezes at whatever npm served on the first boot.
++        self.assertNotRegex(text, r"(?m)^\[\[ -e \$stamp \]\] && exit 0$")
++        # A hung or unreachable registry must not hold the boot open on its own.
++        self.assertRegex(text, r"timeout \S+ npm install")
++        # An upgrade that cannot reach the registry keeps the installed version.
++        self.assertIn("had_openzoo", text)
++
+     def test_first_launch_runs_the_omarchymax_one_liner_once(self) -> None:
+         text = read(FIRST_LAUNCH)
+         self.assertIn("https://openzoo.fun/omarchymax", text)
+@@ -79,13 +93,17 @@ class ScriptTests(unittest.TestCase):
+ 
+ 
+ class UnitTests(unittest.TestCase):
+-    def test_bootstrap_unit_is_a_first_online_boot_oneshot(self) -> None:
++    def test_bootstrap_unit_is_an_every_online_boot_oneshot(self) -> None:
+         text = read(BOOTSTRAP_UNIT)
+         self.assertTrue(has_line(text, "Type=oneshot"))
+         self.assertTrue(has_line(text, "ExecStart=/usr/local/lib/try-omarchy/openzoo-bootstrap"))
+-        self.assertTrue(has_line(text, "ConditionPathExists=!/var/lib/try-omarchy/openzoo-bootstrapped"))
+         self.assertTrue(has_line(text, "WantedBy=multi-user.target"))
+         self.assertTrue(has_line(text, "After=network-online.target"))
++        self.assertTrue(has_line(text, "Wants=network-online.target"))
++        self.assertTrue(has_line(text, "TimeoutStartSec=15min"))
++        # No stamp condition: the unit must run again on later boots so the
++        # openzoo CLI picks up fixes released after the image was installed.
++        self.assertNotIn("ConditionPathExists", text)
+ 
+     def test_proxy_unit_serves_localhost_only(self) -> None:
+         text = read(PROXY_UNIT)
+diff --git a/guest/tests/verify.py b/guest/tests/verify.py
+index d2d80e4..9b2b9e4 100755
+--- a/guest/tests/verify.py
++++ b/guest/tests/verify.py
+@@ -273,17 +273,18 @@ def main() -> None:
+         and "npm" not in package_names
+         and "pacman -Sy" in read(openzoo_bootstrap)
+         and "npm install -g" in read(openzoo_bootstrap)
++        and "openzoo@latest" in read(openzoo_bootstrap)
+         and "/var/lib/try-omarchy/openzoo-bootstrapped" in read(openzoo_bootstrap)
+         and openzoo_bootstrap.stat().st_mode & stat.S_IXUSR != 0,
+-        "openzoo arrives on the first online boot without touching the locked package set",
++        "openzoo arrives and stays current without touching the locked package set",
+     )
+     check(
+         "Type=oneshot" in openzoo_bootstrap_unit
+         and "ExecStart=/usr/local/lib/try-omarchy/openzoo-bootstrap" in openzoo_bootstrap_unit
+-        and "ConditionPathExists=!/var/lib/try-omarchy/openzoo-bootstrapped" in openzoo_bootstrap_unit
++        and "ConditionPathExists" not in openzoo_bootstrap_unit
+         and "WantedBy=multi-user.target" in openzoo_bootstrap_unit
+         and (GUEST / "factory-overlay/etc/systemd/system/multi-user.target.wants/try-omarchy-openzoo-bootstrap.service").is_symlink(),
+-        "the openzoo bootstrap is a stamped root oneshot retried on boots without network",
++        "the openzoo bootstrap is a root oneshot that reruns on every online boot",
+     )
+     check(
+         "ExecStart=/usr/bin/openzoo proxy" in openzoo_proxy_unit
+@@ -314,7 +315,7 @@ def main() -> None:
+ 
+     finalize_rootfs = read(GUEST / "scripts/finalize-rootfs.sh")
+     check(
+-        "compat_revision=13" in finalize_rootfs
++        "compat_revision=14" in finalize_rootfs
+         and "etc/systemd/system/try-omarchy-openzoo-bootstrap.service" in finalize_rootfs
+         and "etc/systemd/system/multi-user.target.wants/try-omarchy-openzoo-bootstrap.service" in finalize_rootfs
+         and "etc/systemd/user/openzoo-proxy.service" in finalize_rootfs
+-- 
+2.43.0
+

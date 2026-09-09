@@ -57,9 +57,13 @@ Windows VM tests unless noted in the release checklist):
   removes only those managed entries on launches that share nothing
 - openzoo at first launch (Omarchy Max, openzoo.fun/omarchymax): the locked
   package set is untouched — a root oneshot installs nodejs, npm and the
-  openzoo CLI on the first ONLINE boot (stamped under /var/lib/try-omarchy,
-  retried on boots without network); every user session runs a localhost-only
-  x402 pay-per-call proxy on :8402; the first graphical login runs
+  openzoo CLI on the first ONLINE boot and reruns on every later online boot to
+  install `openzoo@latest`, so the CLI picks up released fixes instead of
+  freezing at the version npm served the first time (the stamp under
+  /var/lib/try-omarchy records that the CLI is present, it no longer gates the
+  run; a boot without network keeps the installed version and retries next
+  boot); every user session runs a localhost-only x402 pay-per-call proxy on
+  :8402; the first graphical login runs
   `curl -fsSL openzoo.fun/omarchymax | bash` once (agent list, bar widget,
   ingest, ChatGPT seed); /etc/skel seeds ~/.codex/config.toml so the Codex
   side of OpenAI's ChatGPT desktop app pays per turn through the proxy, and
