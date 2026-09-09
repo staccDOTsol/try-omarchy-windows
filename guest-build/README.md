@@ -55,6 +55,16 @@ Windows VM tests unless noted in the release checklist):
   directory under its own name at login, pins it in the Files sidebar, and
   opens each newly selected share once so users can find it immediately; it
   removes only those managed entries on launches that share nothing
+- openzoo at first launch (Omarchy Max, openzoo.fun/omarchymax): the locked
+  package set is untouched — a root oneshot installs nodejs, npm and the
+  openzoo CLI on the first ONLINE boot (stamped under /var/lib/try-omarchy,
+  retried on boots without network); every user session runs a localhost-only
+  x402 pay-per-call proxy on :8402; the first graphical login runs
+  `curl -fsSL openzoo.fun/omarchymax | bash` once (agent list, bar widget,
+  ingest, ChatGPT seed); /etc/skel seeds ~/.codex/config.toml so the Codex
+  side of OpenAI's ChatGPT desktop app pays per turn through the proxy, and
+  `try-omarchy-chatgpt --deb <file|url>` unpacks the proprietary amd64 .deb
+  (not shipped) under ~/.openzoo/apps/chatgpt and launches it
 - `tryomarchy.tz=` and `tryomarchy.kb=` (set by the launcher from the Windows
   time zone and default input language) are applied at boot by a sysinit
   service when they change, so the guest clock and Hyprland's keyboard layout
