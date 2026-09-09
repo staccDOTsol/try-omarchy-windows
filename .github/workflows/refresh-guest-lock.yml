@@ -43,10 +43,10 @@ jobs:
           branch="guest-lock/$(date -u +%Y-%m-%d)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          git checkout -B "$branch"
           git add guest-build
           git commit -m "Refresh the guest package lock"
-          git push origin "$branch"
+          git push --force origin "$branch"
           {
             echo "Arch moved since the guest package lock was written. This adds \`$patch\` so the next prepared guest image builds from the current packages instead of refusing on lock drift."
             echo
@@ -58,4 +58,10 @@ jobs:
             echo
             echo "The guest contract tests passed with the patch applied. CI does not run automatically on a pull request opened with the workflow token; close and reopen it, or push an empty commit, to trigger the checks before merging."
           } > body.md
-          gh pr create --title "Refresh the guest package lock" --body-file body.md --head "$branch" --base master
+          existing=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body-file body.md
+            echo "refreshed existing pull request #$existing"
+          else
+            gh pr create --title "Refresh the guest package lock" --body-file body.md --head "$branch" --base master
+          fi
